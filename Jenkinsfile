@@ -1,83 +1,80 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    // ----- CONFIGURATION -----
-    DOCKERHUB_REPO = 'isaacgeorge/hello'                   // your Docker Hub repo
-    IMAGE_TAG      = "20251026-${BUILD_NUMBER}"            // unique tag per build
-    EC2_HOST       = 'ec2-18-191-134-3.us-east-2.compute.amazonaws.com'
-    EC2_USER       = 'isaac'
-    EC2_CREDS      = 'ec2-creds'                           // SSH private key credential ID in Jenkins
-    APP_PORT       = '9090'                                // public port on EC2
-  }
+    environment {
+        DOCKERHUB_REPO = 'isaacgeorge/hello'
+        IMAGE_TAG      = "20251026-${env.BUILD_NUMBER}"
 
-  stages {
-
-    stage('Checkout') {
-      steps {
-        echo "Checking out code from Git..."
-        checkout scm
-      }
+        EC2_HOST = 'ec2-18-191-134-3.us-east-2.compute.amazonaws.com'
+        EC2_USER = 'isaac'
+        EC2_CREDS = 'ec2-creds'   // Jenkins SSH private key credential ID
     }
 
-    stage('Build Docker Image') {
-      steps {
-        script {
-          echo "Building Docker image: ${DOCKERHUB_REPO}:${IMAGE_TAG}"
-          bat """
-            docker build -t ${DOCKERHUB_REPO}:${IMAGE_TAG} .
-          """
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Checking out source code..."
+                checkout scm
+            }
         }
-      }
-    }
 
-    stage('Push to Docker Hub') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-          script {
-            echo "Pushing image to Docker Hub..."
-            bat """
-              docker login -u %DOCKER_USER% -p %DOCKER_PASS%
-              docker push ${DOCKERHUB_REPO}:${IMAGE_TAG}
-              docker logout
-            """
-          }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "Building Docker image..."
+                    bat """
+                        docker build -t %DOCKERHUB_REPO%:%IMAGE_TAG% .
+                    """
+                }
+            }
         }
-      }
-    }
 
-    stage('Deploy on EC2 (pull & run)') {
-      steps {
-        withCredentials([sshUserPrivateKey(credentialsId: "${EC2_CREDS}", keyFileVariable: 'KEY')]) {
-          script {
-            bat """
-              echo Setting correct permissions on private key...
-              if exist "%KEY%" (
-                "C:\\Windows\\System32\\icacls.exe" "%KEY%" /inheritance:r
-                "C:\\Windows\\System32\\icacls.exe" "%KEY%" /grant:r "%USERNAME%:F"
-                "C:\\Windows\\System32\\icacls.exe" "%KEY%" /remove "BUILTIN\\Users" "NT AUTHORITY\\Authenticated Users" "Everyone" 1>nul 2>nul
-              ) else (
-                echo ERROR: Key file not found: %KEY%
-              )
-
-              echo Deploying to EC2: ${EC2_HOST}...
-              ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "%KEY%" ${EC2_USER}@${EC2_HOST} "docker pull ${DOCKERHUB_REPO}:${IMAGE_TAG} && (docker rm -f hello || true) && docker run -d --name hello -p ${APP_PORT}:8080 ${DOCKERHUB_REPO}:${IMAGE_TAG}"
-            """
-          }
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    echo "Pushing Docker image to DockerHub..."
+                    bat """
+                        docker login -u isaacgeorge -p %DOCKERHUB_TOKEN%
+                        docker push %DOCKERHUB_REPO%:%IMAGE_TAG%
+                    """
+                }
+            }
         }
-      }
-    }
-  }
 
-  post {
-    always {
-      echo "Pipeline finished."
+        stage('Deploy on EC2 (pull & run)') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: "${env.EC2_CREDS}", keyFileVariable: 'EC2_KEY')]) {
+                    script {
+                        echo "Setting correct permissions on private key..."
+                        bat """
+                            if exist "%EC2_KEY%" (
+                                icacls "%EC2_KEY%" /inheritance:r
+                                icacls "%EC2_KEY%" /grant:r "Administrators:F"
+                                icacls "%EC2_KEY%" /remove "BUILTIN\\Users" "NT AUTHORITY\\Authenticated Users" "Everyone" >nul 2>nul
+                            ) else (
+                                echo ERROR: Key file not found: %EC2_KEY%
+                                exit /b 1
+                            )
+                        """
+
+                        echo "Deploying to EC2: ${env.EC2_HOST}..."
+                        bat """
+                            ssh -T -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "%EC2_KEY%" %EC2_USER%@%EC2_HOST% ^
+                            "docker pull %DOCKERHUB_REPO%:%IMAGE_TAG% && (docker rm -f hello || true) && docker run -d --name hello -p 9090:8080 %DOCKERHUB_REPO%:%IMAGE_TAG%"
+                        """
+                    }
+                }
+            }
+        }
     }
-    success {
-      echo "Deployed: http://${EC2_HOST}:${APP_PORT}"
+
+    post {
+        success {
+            echo "Deployed successfully!"
+            echo "Visit: http://${env.EC2_HOST}:9090"
+        }
+        failure {
+            echo "❌ Deployment failed. Check Jenkins console output for details."
+        }
     }
-    failure {
-      echo "Deployment failed. Check permissions or credentials."
-    }
-  }
 }
